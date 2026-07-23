@@ -1,0 +1,15 @@
+[package]
+name = "monitor-control"
+version = "0.1.0"
+edition = "2024"
+description = "Windows monitor discovery and brightness control"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+windows-sys = { version = ">=0.59, <=0.61", features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+] }
+wmi = { version = "0.18.4", default-features = false }
