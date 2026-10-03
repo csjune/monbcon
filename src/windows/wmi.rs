@@ -8,6 +8,7 @@ use super::{MonitorError, MonitorId};
 
 pub(super) struct WmiMonitor {
     id: MonitorId,
+    pnp_id: String,
     name: String,
     brightness: i32,
     instance_path: String,
@@ -16,6 +17,10 @@ pub(super) struct WmiMonitor {
 impl WmiMonitor {
     pub(super) fn id(&self) -> &MonitorId {
         &self.id
+    }
+
+    pub(super) fn pnp_id(&self) -> &str {
+        &self.pnp_id
     }
 
     pub(super) fn name(&self) -> &str {
@@ -33,7 +38,7 @@ impl WmiMonitor {
             Timeout: 0,
             Brightness: percent as u8,
         };
-        let output: WmiSetBrightnessOutput = connection
+        let output: Option<WmiSetBrightnessOutput> = connection
             .exec_instance_method::<WmiMonitorBrightnessMethods, _>(
                 &self.instance_path,
                 "WmiSetBrightness",
@@ -41,10 +46,10 @@ impl WmiMonitor {
             )
             .map_err(|error| MonitorError::wmi("WmiSetBrightness failed", error))?;
 
-        if output.ReturnValue != 0 {
+        if let Some(code) = output.and_then(|output| failed_return_value(output.ReturnValue)) {
             return Err(MonitorError::Win32 {
                 context: "WmiSetBrightness failed",
-                code: output.ReturnValue,
+                code,
             });
         }
 
@@ -124,6 +129,7 @@ pub(super) fn discover(
 
         monitors.push(WmiMonitor {
             id: MonitorId::new(format!("wmi:{}", normalize_pnp_id(&monitor.InstanceName))),
+            pnp_id,
             name,
             brightness: monitor.CurrentBrightness as i32,
             instance_path,
@@ -245,12 +251,25 @@ struct WmiSetBrightnessInput {
 #[derive(Deserialize)]
 #[allow(non_snake_case)]
 struct WmiSetBrightnessOutput {
-    ReturnValue: u32,
+    // Some integrated-display drivers omit this otherwise standard field.
+    #[serde(default)]
+    ReturnValue: Option<u32>,
+}
+
+fn failed_return_value(return_value: Option<u32>) -> Option<u32> {
+    return_value.filter(|&code| code != 0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{friendly_name_from_wmi, wmi_instance_to_pnp_id};
+    use super::{failed_return_value, friendly_name_from_wmi, wmi_instance_to_pnp_id};
+
+    #[test]
+    fn missing_wmi_return_value_is_treated_as_success() {
+        assert_eq!(failed_return_value(None), None);
+        assert_eq!(failed_return_value(Some(0)), None);
+        assert_eq!(failed_return_value(Some(1)), Some(1));
+    }
 
     #[test]
     fn wmi_names_and_instance_ids_are_normalized() {

@@ -130,11 +130,12 @@ impl MonitorController {
         let mut monitors = Vec::new();
         let mut successful_backends = 0;
         let mut backend_errors = Vec::new();
+        let mut ddc_warnings = Vec::new();
 
         match ddc::discover(&active_paths) {
             Ok(discovery) => {
                 successful_backends += 1;
-                warnings.extend(discovery.warnings);
+                ddc_warnings = discovery.warnings;
                 monitors.extend(
                     discovery
                         .monitors
@@ -149,12 +150,16 @@ impl MonitorController {
             }
         }
 
+        let mut wmi_pnp_ids = HashSet::new();
         let active_filter = active_paths.is_complete().then_some(&active_paths);
         match wmi::discover(active_filter) {
             Ok(discovery) => {
                 successful_backends += 1;
                 warnings.extend(discovery.warnings);
-                monitors.extend(discovery.monitors.into_iter().map(Monitor::Wmi));
+                monitors.extend(discovery.monitors.into_iter().map(|monitor| {
+                    wmi_pnp_ids.insert(monitor.pnp_id().to_string());
+                    Monitor::Wmi(monitor)
+                }));
             }
             Err(error) => {
                 let error = format!("failed to refresh WMI monitors: {error}");
@@ -162,6 +167,13 @@ impl MonitorController {
                 backend_errors.push(error);
             }
         }
+
+        warnings.extend(
+            ddc_warnings
+                .into_iter()
+                .filter(|warning| !warning.is_covered_by_wmi(&wmi_pnp_ids))
+                .map(|warning| warning.message),
+        );
 
         if successful_backends == 0 {
             return Err(MonitorError::InvalidData {

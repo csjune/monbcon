@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::mem;
 use std::ptr;
 
@@ -19,7 +20,29 @@ use super::{MonitorError, MonitorId, last_win32_error, wide_to_string};
 
 pub(super) struct DdcDiscovery {
     pub(super) monitors: Vec<DdcMonitor>,
-    pub(super) warnings: Vec<String>,
+    pub(super) warnings: Vec<DdcWarning>,
+}
+
+pub(super) struct DdcWarning {
+    pub(super) pnp_ids: Vec<String>,
+    pub(super) message: String,
+}
+
+impl DdcWarning {
+    fn inspection_failure(
+        display_name: &str,
+        pnp_ids: &[String],
+        error: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            pnp_ids: pnp_ids.to_vec(),
+            message: format!("failed to inspect {display_name}: {error}"),
+        }
+    }
+
+    pub(super) fn is_covered_by_wmi(&self, wmi_pnp_ids: &HashSet<String>) -> bool {
+        !self.pnp_ids.is_empty() && self.pnp_ids.iter().all(|id| wmi_pnp_ids.contains(id))
+    }
 }
 
 pub(super) struct DdcMonitor {
@@ -125,7 +148,11 @@ fn discover_physical_monitors(hmonitor: HMONITOR, paths: &ActiveDisplayPaths) ->
         let error = last_win32_error("GetNumberOfPhysicalMonitorsFromHMONITOR failed");
         return DdcDiscovery {
             monitors: Vec::new(),
-            warnings: vec![format!("failed to inspect {display_name}: {error}")],
+            warnings: vec![DdcWarning::inspection_failure(
+                &display_name,
+                pnp_ids,
+                error,
+            )],
         };
     }
     if count == 0 {
@@ -142,7 +169,11 @@ fn discover_physical_monitors(hmonitor: HMONITOR, paths: &ActiveDisplayPaths) ->
         let error = last_win32_error("GetPhysicalMonitorsFromHMONITOR failed");
         return DdcDiscovery {
             monitors: Vec::new(),
-            warnings: vec![format!("failed to inspect {display_name}: {error}")],
+            warnings: vec![DdcWarning::inspection_failure(
+                &display_name,
+                pnp_ids,
+                error,
+            )],
         };
     }
 
@@ -152,7 +183,11 @@ fn discover_physical_monitors(hmonitor: HMONITOR, paths: &ActiveDisplayPaths) ->
         match build_monitor(hmonitor, &display_name, pnp_ids, index, physical_monitor) {
             Ok(Some(monitor)) => monitors.push(monitor),
             Ok(None) => {}
-            Err(error) => warnings.push(format!("failed to inspect {display_name}: {error}")),
+            Err(error) => warnings.push(DdcWarning::inspection_failure(
+                &display_name,
+                pnp_ids,
+                error,
+            )),
         }
     }
 
