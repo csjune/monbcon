@@ -56,7 +56,11 @@ pub struct ApplyReport {
 #[path = "windows/mod.rs"]
 mod platform;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "linux/mod.rs"]
+mod platform;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod platform {
     use std::fmt;
 
@@ -67,7 +71,10 @@ mod platform {
 
     impl fmt::Display for MonitorError {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(formatter, "monitor brightness is only supported on Windows")
+            write!(
+                formatter,
+                "monitor brightness is only supported on Windows and Linux"
+            )
         }
     }
 
