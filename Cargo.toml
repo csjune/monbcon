@@ -1,5 +1,5 @@
 [package]
-name = "monitor-control"
+name = "monbcon"
 version = "0.1.0"
 edition = "2024"
 description = "Windows and Linux monitor discovery and brightness control"
