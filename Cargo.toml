@@ -3,6 +3,13 @@ name = "monbcon"
 version = "0.1.0"
 edition = "2024"
 description = "Windows and Linux monitor discovery and brightness control"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/csjune/monbcon"
+readme = "README.md"
+keywords = ["ddc", "brightness", "monitor", "backlight", "display"]
+categories = ["hardware-support", "os::linux-apis", "os::windows-apis"]
+rust-version = "1.85"
+# Not on crates.io yet; remove once the public API is ready to publish.
 publish = false
 
 [target.'cfg(windows)'.dependencies]
@@ -17,3 +24,6 @@ wmi = { version = "0.18.4", default-features = false }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 zbus = "5"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
