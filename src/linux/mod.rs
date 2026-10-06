@@ -10,9 +10,8 @@ use std::io;
 
 use self::backlight::BacklightMonitor;
 use self::ddc::DdcMonitor;
-use super::{
-    ApplyOutcome, ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot, RefreshResult,
-};
+use super::apply::{self, AdjustableMonitor};
+use super::{ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot, RefreshResult};
 
 #[derive(Debug)]
 pub enum MonitorError {
@@ -79,17 +78,19 @@ enum Monitor {
 }
 
 impl Monitor {
-    fn id(&self) -> &MonitorId {
-        match self {
-            Self::Ddc(monitor) => monitor.id(),
-            Self::Backlight(monitor) => monitor.id(),
-        }
-    }
-
     fn name(&self) -> &str {
         match self {
             Self::Ddc(monitor) => monitor.name(),
             Self::Backlight(monitor) => monitor.name(),
+        }
+    }
+}
+
+impl AdjustableMonitor for Monitor {
+    fn id(&self) -> &MonitorId {
+        match self {
+            Self::Ddc(monitor) => monitor.id(),
+            Self::Backlight(monitor) => monitor.id(),
         }
     }
 
@@ -228,57 +229,7 @@ impl MonitorController {
     }
 
     pub fn apply(&mut self, updates: Vec<BrightnessUpdate>) -> ApplyReport {
-        let outcomes = updates
-            .into_iter()
-            .map(|update| {
-                let requested = update.value.clamp(0, 100);
-                if update.generation != self.generation {
-                    return ApplyOutcome {
-                        generation: update.generation,
-                        id: update.id,
-                        requested,
-                        effective: None,
-                        error: Some(
-                            MonitorError::StaleGeneration {
-                                requested: update.generation,
-                                current: self.generation,
-                            }
-                            .to_string(),
-                        ),
-                    };
-                }
-                let Some(monitor) = self
-                    .monitors
-                    .iter_mut()
-                    .find(|monitor| monitor.id() == &update.id)
-                else {
-                    let error = MonitorError::UnknownMonitor(update.id.clone()).to_string();
-                    return ApplyOutcome {
-                        generation: update.generation,
-                        id: update.id,
-                        requested,
-                        effective: None,
-                        error: Some(error),
-                    };
-                };
-
-                let previous = monitor.brightness();
-                let error = monitor
-                    .set_brightness(requested)
-                    .err()
-                    .map(|error| error.to_string());
-
-                ApplyOutcome {
-                    generation: update.generation,
-                    id: update.id,
-                    requested,
-                    effective: Some(if error.is_some() { previous } else { requested }),
-                    error,
-                }
-            })
-            .collect();
-
-        ApplyReport { outcomes }
+        apply::apply_updates(&mut self.monitors, self.generation, updates)
     }
 }
 

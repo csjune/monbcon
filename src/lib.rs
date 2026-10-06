@@ -118,4 +118,7 @@ mod platform {
     }
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+mod apply;
+
 pub use platform::{MonitorController, MonitorError};
