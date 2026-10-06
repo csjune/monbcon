@@ -78,6 +78,7 @@ impl Discovery {
         self.monitors.push(Box::new(monitor));
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn monitor_ids(&self) -> impl Iterator<Item = &MonitorId> {
         self.monitors.iter().map(|monitor| monitor.id())
     }
