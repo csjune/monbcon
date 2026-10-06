@@ -52,6 +52,38 @@ pub struct ApplyReport {
     pub outcomes: Vec<ApplyOutcome>,
 }
 
+#[derive(Debug)]
+pub enum MonitorError {
+    /// Every discovery backend of the platform failed.
+    DiscoveryFailed(String),
+    StaleGeneration {
+        requested: u64,
+        current: u64,
+    },
+    UnknownMonitor(MonitorId),
+}
+
+impl std::fmt::Display for MonitorError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DiscoveryFailed(details) => {
+                write!(formatter, "monitor discovery failed: {details}")
+            }
+            Self::StaleGeneration { requested, current } => write!(
+                formatter,
+                "stale monitor generation {requested}; current generation is {current}"
+            ),
+            Self::UnknownMonitor(id) => write!(formatter, "unknown monitor id {id}"),
+        }
+    }
+}
+
+impl std::error::Error for MonitorError {}
+
+mod controller;
+#[cfg(any(windows, target_os = "linux"))]
+mod scale;
+
 #[cfg(windows)]
 #[path = "windows/mod.rs"]
 mod platform;
@@ -62,63 +94,18 @@ mod platform;
 
 #[cfg(not(any(windows, target_os = "linux")))]
 mod platform {
-    use std::fmt;
+    use super::controller::Discovery;
 
-    use super::{ApplyOutcome, ApplyReport, BrightnessUpdate, RefreshResult};
+    pub(crate) type BackendError = std::convert::Infallible;
 
-    #[derive(Debug)]
-    pub struct MonitorError;
-
-    impl fmt::Display for MonitorError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(
-                formatter,
-                "monitor brightness is only supported on Windows and Linux"
-            )
-        }
-    }
-
-    impl std::error::Error for MonitorError {}
-
-    pub struct MonitorController;
-
-    impl Default for MonitorController {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl MonitorController {
-        pub fn new() -> Self {
-            Self
-        }
-
-        pub fn refresh(&mut self) -> Result<RefreshResult, MonitorError> {
-            Ok(RefreshResult {
-                generation: 0,
-                snapshots: Vec::new(),
-                warnings: Vec::new(),
-            })
-        }
-
-        pub fn apply(&mut self, updates: Vec<BrightnessUpdate>) -> ApplyReport {
-            ApplyReport {
-                outcomes: updates
-                    .into_iter()
-                    .map(|update| ApplyOutcome {
-                        generation: update.generation,
-                        id: update.id,
-                        requested: update.value,
-                        effective: None,
-                        error: Some(MonitorError.to_string()),
-                    })
-                    .collect(),
-            }
-        }
+    pub(crate) fn discover() -> Discovery {
+        let mut discovery = Discovery::default();
+        discovery.backend::<()>(
+            "monitors",
+            Err("monitor brightness is only supported on Windows and Linux"),
+        );
+        discovery
     }
 }
 
-#[cfg(any(windows, target_os = "linux"))]
-mod apply;
-
-pub use platform::{MonitorController, MonitorError};
+pub use controller::MonitorController;

@@ -10,7 +10,7 @@ use windows_sys::Win32::Devices::Display::{
 };
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
 
-use super::{MonitorError, wide_to_string, win32_status};
+use super::{BackendError, wide_to_string, win32_status};
 
 #[derive(Default)]
 pub(super) struct ActiveDisplayPaths {
@@ -48,7 +48,7 @@ impl ActiveDisplayPaths {
     }
 }
 
-pub(super) fn active_display_paths() -> Result<ActiveDisplayPaths, MonitorError> {
+pub(super) fn active_display_paths() -> Result<ActiveDisplayPaths, BackendError> {
     let paths = query_active_paths()?;
     let mut result = ActiveDisplayPaths {
         complete: true,
@@ -72,7 +72,7 @@ pub(super) fn active_display_paths() -> Result<ActiveDisplayPaths, MonitorError>
     Ok(result)
 }
 
-fn query_active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, MonitorError> {
+fn query_active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, BackendError> {
     let flags = QDC_ONLY_ACTIVE_PATHS;
     let mut path_count = 0;
     let mut mode_count = 0;
@@ -114,13 +114,13 @@ fn query_active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, MonitorError> {
     ))
 }
 
-fn active_display_path(path: DISPLAYCONFIG_PATH_INFO) -> Result<(String, String), MonitorError> {
+fn active_display_path(path: DISPLAYCONFIG_PATH_INFO) -> Result<(String, String), BackendError> {
     let gdi_name = active_display_gdi_name(path)?;
     let pnp_id = active_display_pnp_id(path)?;
     Ok((gdi_name, pnp_id))
 }
 
-fn active_display_gdi_name(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, MonitorError> {
+fn active_display_gdi_name(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, BackendError> {
     let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
             r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
@@ -141,13 +141,13 @@ fn active_display_gdi_name(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, Moni
         ));
     }
 
-    wide_to_string(&source_name.viewGdiDeviceName).ok_or_else(|| MonitorError::InvalidData {
+    wide_to_string(&source_name.viewGdiDeviceName).ok_or_else(|| BackendError::InvalidData {
         context: "invalid active display source name",
         details: format!("source id {}", path.sourceInfo.id),
     })
 }
 
-fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, MonitorError> {
+fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, BackendError> {
     let mut target_name = DISPLAYCONFIG_TARGET_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
             r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
@@ -170,7 +170,7 @@ fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, Monito
 
     wide_to_string(&target_name.monitorDevicePath)
         .and_then(|path| pnp_id_from_monitor_device_path(&path))
-        .ok_or_else(|| MonitorError::InvalidData {
+        .ok_or_else(|| BackendError::InvalidData {
             context: "invalid active monitor device path",
             details: format!("target id {}", path.targetInfo.id),
         })

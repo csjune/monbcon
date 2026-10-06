@@ -16,7 +16,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::core::BOOL;
 
 use super::display_config::ActiveDisplayPaths;
-use super::{MonitorError, MonitorId, last_win32_error, wide_to_string};
+use super::{BackendError, last_win32_error, wide_to_string};
+use crate::MonitorId;
+use crate::controller::AdjustableMonitor;
+use crate::scale::{percent_to_raw, raw_to_percent};
 
 pub(super) struct DdcDiscovery {
     pub(super) monitors: Vec<DdcMonitor>,
@@ -54,20 +57,22 @@ pub(super) struct DdcMonitor {
     max: u32,
 }
 
-impl DdcMonitor {
-    pub(super) fn id(&self) -> &MonitorId {
+impl AdjustableMonitor for DdcMonitor {
+    type Error = BackendError;
+
+    fn id(&self) -> &MonitorId {
         &self.id
     }
 
-    pub(super) fn name(&self) -> &str {
+    fn name(&self) -> &str {
         &self.name
     }
 
-    pub(super) fn brightness(&self) -> i32 {
+    fn brightness(&self) -> i32 {
         self.brightness
     }
 
-    pub(super) fn set_brightness(&mut self, percent: i32) -> Result<(), MonitorError> {
+    fn set_brightness(&mut self, percent: i32) -> Result<(), BackendError> {
         let percent = percent.clamp(0, 100);
         let raw = percent_to_raw(percent, self.min, self.max);
         let ok = unsafe { SetMonitorBrightness(self.physical_monitor.handle(), raw) };
@@ -107,7 +112,7 @@ impl Drop for PhysicalMonitorHandle {
     }
 }
 
-pub(super) fn discover(paths: &ActiveDisplayPaths) -> Result<DdcDiscovery, MonitorError> {
+pub(super) fn discover(paths: &ActiveDisplayPaths) -> Result<DdcDiscovery, BackendError> {
     let hmonitors = enumerate_display_monitors()?;
     let mut monitors = Vec::new();
     let mut warnings = Vec::new();
@@ -121,7 +126,7 @@ pub(super) fn discover(paths: &ActiveDisplayPaths) -> Result<DdcDiscovery, Monit
     Ok(DdcDiscovery { monitors, warnings })
 }
 
-fn enumerate_display_monitors() -> Result<Vec<HMONITOR>, MonitorError> {
+fn enumerate_display_monitors() -> Result<Vec<HMONITOR>, BackendError> {
     let mut monitors = Vec::new();
     let ok = unsafe {
         EnumDisplayMonitors(
@@ -200,7 +205,7 @@ fn build_monitor(
     pnp_ids: &[String],
     physical_index: usize,
     physical_monitor: PHYSICAL_MONITOR,
-) -> Result<Option<DdcMonitor>, MonitorError> {
+) -> Result<Option<DdcMonitor>, BackendError> {
     let physical_monitor = PhysicalMonitorHandle::new(physical_monitor);
     let mut capabilities = 0;
     let mut color_temperatures = 0;
@@ -228,13 +233,13 @@ fn build_monitor(
             BrightnessErrorKind::Unsupported => return Ok(None),
             BrightnessErrorKind::Failed => {}
         }
-        return Err(MonitorError::Win32 {
+        return Err(BackendError::Win32 {
             context: "GetMonitorBrightness failed",
             code,
         });
     }
     if max <= min {
-        return Err(MonitorError::InvalidData {
+        return Err(BackendError::InvalidData {
             context: "invalid DDC brightness range",
             details: format!("minimum {min}, maximum {max}"),
         });
@@ -320,34 +325,13 @@ fn display_name(hmonitor: HMONITOR) -> Option<String> {
     }
 }
 
-fn raw_to_percent(value: u32, min: u32, max: u32) -> i32 {
-    (((value.saturating_sub(min)) as f64 / (max - min) as f64) * 100.0)
-        .round()
-        .clamp(0.0, 100.0) as i32
-}
-
-fn percent_to_raw(percent: i32, min: u32, max: u32) -> u32 {
-    let range = max - min;
-    min + ((percent.clamp(0, 100) as u32 * range + 50) / 100)
-}
-
 #[cfg(test)]
 mod tests {
     use windows_sys::Win32::Foundation::{
         ERROR_GEN_FAILURE, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
     };
 
-    use super::{BrightnessErrorKind, classify_brightness_error, percent_to_raw, raw_to_percent};
-
-    #[test]
-    fn brightness_conversion_respects_monitor_ranges() {
-        assert_eq!(raw_to_percent(10, 10, 90), 0);
-        assert_eq!(raw_to_percent(50, 10, 90), 50);
-        assert_eq!(raw_to_percent(90, 10, 90), 100);
-        assert_eq!(percent_to_raw(0, 10, 90), 10);
-        assert_eq!(percent_to_raw(50, 10, 90), 50);
-        assert_eq!(percent_to_raw(100, 10, 90), 90);
-    }
+    use super::{BrightnessErrorKind, classify_brightness_error};
 
     #[test]
     fn only_explicit_unsupported_errors_hide_a_monitor() {

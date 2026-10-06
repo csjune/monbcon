@@ -7,13 +7,10 @@ use std::fmt;
 
 use windows_sys::Win32::Foundation::GetLastError;
 
-use self::ddc::DdcMonitor;
-use self::wmi::WmiMonitor;
-use super::apply::{self, AdjustableMonitor};
-use super::{ApplyReport, BrightnessUpdate, MonitorId, MonitorSnapshot, RefreshResult};
+use super::controller::Discovery;
 
 #[derive(Debug)]
-pub enum MonitorError {
+pub(crate) enum BackendError {
     Win32 {
         context: &'static str,
         code: u32,
@@ -26,14 +23,9 @@ pub enum MonitorError {
         context: &'static str,
         details: String,
     },
-    StaleGeneration {
-        requested: u64,
-        current: u64,
-    },
-    UnknownMonitor(MonitorId),
 }
 
-impl MonitorError {
+impl BackendError {
     pub(super) fn wmi(context: &'static str, error: impl fmt::Display) -> Self {
         Self::Wmi {
             context,
@@ -42,7 +34,7 @@ impl MonitorError {
     }
 }
 
-impl fmt::Display for MonitorError {
+impl fmt::Display for BackendError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Win32 { context, code } => {
@@ -50,186 +42,60 @@ impl fmt::Display for MonitorError {
             }
             Self::Wmi { context, details } => write!(formatter, "{context}: {details}"),
             Self::InvalidData { context, details } => write!(formatter, "{context}: {details}"),
-            Self::StaleGeneration { requested, current } => write!(
-                formatter,
-                "stale monitor generation {requested}; current generation is {current}"
-            ),
-            Self::UnknownMonitor(id) => write!(formatter, "unknown monitor id {id}"),
         }
     }
 }
 
-impl std::error::Error for MonitorError {}
+impl std::error::Error for BackendError {}
 
-enum Monitor {
-    Ddc(Box<DdcMonitor>),
-    Wmi(WmiMonitor),
+pub(crate) fn discover() -> Discovery {
+    let mut discovery = Discovery::default();
+    let active_paths = match display_config::active_display_paths() {
+        Ok(paths) => paths,
+        Err(error) => {
+            discovery.warn(format!("failed to query active display paths: {error}"));
+            display_config::ActiveDisplayPaths::default()
+        }
+    };
+    discovery.extend_warnings(active_paths.warnings.iter().cloned());
+
+    let mut ddc_warnings = Vec::new();
+    if let Some(ddc) = discovery.backend("DDC monitors", ddc::discover(&active_paths)) {
+        ddc_warnings = ddc.warnings;
+        for monitor in ddc.monitors {
+            discovery.add(monitor);
+        }
+    }
+
+    let mut wmi_pnp_ids = HashSet::new();
+    let active_filter = active_paths.is_complete().then_some(&active_paths);
+    if let Some(wmi) = discovery.backend("WMI monitors", wmi::discover(active_filter)) {
+        discovery.extend_warnings(wmi.warnings);
+        for monitor in wmi.monitors {
+            wmi_pnp_ids.insert(monitor.pnp_id().to_string());
+            discovery.add(monitor);
+        }
+    }
+
+    discovery.extend_warnings(
+        ddc_warnings
+            .into_iter()
+            .filter(|warning| !warning.is_covered_by_wmi(&wmi_pnp_ids))
+            .map(|warning| warning.message),
+    );
+
+    discovery
 }
 
-impl Monitor {
-    fn name(&self) -> &str {
-        match self {
-            Self::Ddc(monitor) => monitor.name(),
-            Self::Wmi(monitor) => monitor.name(),
-        }
-    }
-}
-
-impl AdjustableMonitor for Monitor {
-    fn id(&self) -> &MonitorId {
-        match self {
-            Self::Ddc(monitor) => monitor.id(),
-            Self::Wmi(monitor) => monitor.id(),
-        }
-    }
-
-    fn brightness(&self) -> i32 {
-        match self {
-            Self::Ddc(monitor) => monitor.brightness(),
-            Self::Wmi(monitor) => monitor.brightness(),
-        }
-    }
-
-    fn set_brightness(&mut self, percent: i32) -> Result<(), MonitorError> {
-        match self {
-            Self::Ddc(monitor) => monitor.set_brightness(percent),
-            Self::Wmi(monitor) => monitor.set_brightness(percent),
-        }
-    }
-}
-
-pub struct MonitorController {
-    monitors: Vec<Monitor>,
-    generation: u64,
-}
-
-impl Default for MonitorController {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MonitorController {
-    pub fn new() -> Self {
-        Self {
-            monitors: Vec::new(),
-            generation: 0,
-        }
-    }
-
-    pub fn refresh(&mut self) -> Result<RefreshResult, MonitorError> {
-        let mut warnings = Vec::new();
-        let active_paths = match display_config::active_display_paths() {
-            Ok(paths) => paths,
-            Err(error) => {
-                warnings.push(format!("failed to query active display paths: {error}"));
-                display_config::ActiveDisplayPaths::default()
-            }
-        };
-        warnings.extend(active_paths.warnings.iter().cloned());
-
-        let mut monitors = Vec::new();
-        let mut successful_backends = 0;
-        let mut backend_errors = Vec::new();
-        let mut ddc_warnings = Vec::new();
-
-        match ddc::discover(&active_paths) {
-            Ok(discovery) => {
-                successful_backends += 1;
-                ddc_warnings = discovery.warnings;
-                monitors.extend(
-                    discovery
-                        .monitors
-                        .into_iter()
-                        .map(|monitor| Monitor::Ddc(Box::new(monitor))),
-                );
-            }
-            Err(error) => {
-                let error = format!("failed to refresh DDC monitors: {error}");
-                warnings.push(error.clone());
-                backend_errors.push(error);
-            }
-        }
-
-        let mut wmi_pnp_ids = HashSet::new();
-        let active_filter = active_paths.is_complete().then_some(&active_paths);
-        match wmi::discover(active_filter) {
-            Ok(discovery) => {
-                successful_backends += 1;
-                warnings.extend(discovery.warnings);
-                monitors.extend(discovery.monitors.into_iter().map(|monitor| {
-                    wmi_pnp_ids.insert(monitor.pnp_id().to_string());
-                    Monitor::Wmi(monitor)
-                }));
-            }
-            Err(error) => {
-                let error = format!("failed to refresh WMI monitors: {error}");
-                warnings.push(error.clone());
-                backend_errors.push(error);
-            }
-        }
-
-        warnings.extend(
-            ddc_warnings
-                .into_iter()
-                .filter(|warning| !warning.is_covered_by_wmi(&wmi_pnp_ids))
-                .map(|warning| warning.message),
-        );
-
-        if successful_backends == 0 {
-            return Err(MonitorError::InvalidData {
-                context: "monitor discovery failed",
-                details: backend_errors.join("; "),
-            });
-        }
-
-        let mut monitor_ids = HashSet::new();
-        monitors.retain(|monitor| {
-            if monitor_ids.insert(monitor.id().clone()) {
-                true
-            } else {
-                warnings.push(format!(
-                    "ignored duplicate monitor id {} ({})",
-                    monitor.id(),
-                    monitor.name()
-                ));
-                false
-            }
-        });
-
-        self.monitors = monitors;
-        self.generation = self.generation.wrapping_add(1).max(1);
-        let snapshots = self
-            .monitors
-            .iter()
-            .map(|monitor| MonitorSnapshot {
-                id: monitor.id().clone(),
-                name: monitor.name().to_string(),
-                brightness: monitor.brightness(),
-            })
-            .collect();
-
-        Ok(RefreshResult {
-            generation: self.generation,
-            snapshots,
-            warnings,
-        })
-    }
-
-    pub fn apply(&mut self, updates: Vec<BrightnessUpdate>) -> ApplyReport {
-        apply::apply_updates(&mut self.monitors, self.generation, updates)
-    }
-}
-
-pub(super) fn last_win32_error(context: &'static str) -> MonitorError {
-    MonitorError::Win32 {
+pub(super) fn last_win32_error(context: &'static str) -> BackendError {
+    BackendError::Win32 {
         context,
         code: unsafe { GetLastError() },
     }
 }
 
-pub(super) fn win32_status(context: &'static str, code: u32) -> MonitorError {
-    MonitorError::Win32 { context, code }
+pub(super) fn win32_status(context: &'static str, code: u32) -> BackendError {
+    BackendError::Win32 { context, code }
 }
 
 pub(super) fn wide_to_string(buffer: &[u16]) -> Option<String> {

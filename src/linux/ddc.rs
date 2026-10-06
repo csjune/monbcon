@@ -4,10 +4,13 @@ use std::io;
 use std::thread;
 use std::time::Duration;
 
+use super::BackendError;
 use super::drm::{ConnectorMatch, Connectors};
 use super::edid::{self, Edid};
 use super::i2c::{self, I2cDevice};
-use super::{MonitorError, MonitorId, percent_to_raw, raw_to_percent};
+use crate::MonitorId;
+use crate::controller::AdjustableMonitor;
+use crate::scale::{percent_to_raw, raw_to_percent};
 
 const EDID_ADDRESS: u16 = 0x50;
 const DDC_ADDRESS: u16 = 0x37;
@@ -51,25 +54,27 @@ pub(super) struct DdcMonitor {
     max: u16,
 }
 
-impl DdcMonitor {
-    pub(super) fn id(&self) -> &MonitorId {
+impl AdjustableMonitor for DdcMonitor {
+    type Error = BackendError;
+
+    fn id(&self) -> &MonitorId {
         &self.id
     }
 
-    pub(super) fn name(&self) -> &str {
+    fn name(&self) -> &str {
         &self.name
     }
 
-    pub(super) fn brightness(&self) -> i32 {
+    fn brightness(&self) -> i32 {
         self.brightness
     }
 
-    pub(super) fn set_brightness(&mut self, percent: i32) -> Result<(), MonitorError> {
+    fn set_brightness(&mut self, percent: i32) -> Result<(), BackendError> {
         let percent = percent.clamp(0, 100);
         let raw = percent_to_raw(percent, 0, u32::from(self.max)) as u16;
         let result = self.device.write(&set_vcp_request(VCP_BRIGHTNESS, raw));
         thread::sleep(COMMAND_DELAY);
-        result.map_err(|error| MonitorError::Ddc {
+        result.map_err(|error| BackendError::Device {
             context: "failed to set DDC brightness",
             details: format!("{} on i2c-{}: {error}", self.name, self.bus),
         })?;
@@ -79,9 +84,9 @@ impl DdcMonitor {
     }
 }
 
-pub(super) fn discover(connectors: &Connectors) -> Result<DdcDiscovery, MonitorError> {
+pub(super) fn discover(connectors: &Connectors) -> Result<DdcDiscovery, BackendError> {
     let buses = i2c::display_buses()
-        .map_err(|error| MonitorError::io("failed to enumerate I2C buses", error))?;
+        .map_err(|error| BackendError::io("failed to enumerate I2C buses", error))?;
     let mut monitors = Vec::new();
     let mut warnings = Vec::new();
     let mut handled_edids = HashSet::new();

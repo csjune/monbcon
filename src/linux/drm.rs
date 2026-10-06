@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::MonitorError;
+use super::BackendError;
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
 const EDID_BLOCK_LEN: usize = 128;
@@ -63,9 +63,9 @@ impl Connectors {
     }
 }
 
-pub(super) fn connectors() -> Result<Connectors, MonitorError> {
+pub(super) fn connectors() -> Result<Connectors, BackendError> {
     let entries = fs::read_dir(DRM_CLASS_PATH)
-        .map_err(|error| MonitorError::io(format!("failed to read {DRM_CLASS_PATH}"), error))?;
+        .map_err(|error| BackendError::io(format!("failed to read {DRM_CLASS_PATH}"), error))?;
     let mut connectors = Vec::new();
 
     for entry in entries.flatten() {

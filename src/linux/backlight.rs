@@ -3,10 +3,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::BackendError;
 use super::ddc;
 use super::drm::{ConnectorMatch, Connectors};
 use super::edid;
-use super::{MonitorError, MonitorId, percent_to_raw, raw_to_percent};
+use crate::MonitorId;
+use crate::controller::AdjustableMonitor;
+use crate::scale::{percent_to_raw, raw_to_percent};
 
 const BACKLIGHT_CLASS_PATH: &str = "/sys/class/backlight";
 const SUBSYSTEM: &str = "backlight";
@@ -45,20 +48,24 @@ impl BacklightMonitor {
             max: values.max,
         }
     }
+}
 
-    pub(super) fn id(&self) -> &MonitorId {
+impl AdjustableMonitor for BacklightMonitor {
+    type Error = BackendError;
+
+    fn id(&self) -> &MonitorId {
         &self.id
     }
 
-    pub(super) fn name(&self) -> &str {
+    fn name(&self) -> &str {
         &self.name
     }
 
-    pub(super) fn brightness(&self) -> i32 {
+    fn brightness(&self) -> i32 {
         self.brightness
     }
 
-    pub(super) fn set_brightness(&mut self, percent: i32) -> Result<(), MonitorError> {
+    fn set_brightness(&mut self, percent: i32) -> Result<(), BackendError> {
         let percent = percent.clamp(0, 100);
         let raw = percent_to_raw(percent, self.min, self.max);
 
@@ -66,7 +73,7 @@ impl BacklightMonitor {
         // Fall back to sysfs for setups where the user owns the device.
         if let Err(logind_error) = set_with_logind(&self.device_name, raw) {
             fs::write(self.path.join("brightness"), raw.to_string()).map_err(|sysfs_error| {
-                MonitorError::Backlight {
+                BackendError::Device {
                     context: "failed to set backlight brightness",
                     details: format!(
                         "{}: logind: {logind_error}; sysfs: {sysfs_error}",
@@ -99,7 +106,7 @@ fn set_with_logind(device_name: &str, raw: u32) -> zbus::Result<()> {
 pub(super) fn discover(
     connectors: &Connectors,
     ddc_monitor_ids: &HashSet<MonitorId>,
-) -> Result<BacklightDiscovery, MonitorError> {
+) -> Result<BacklightDiscovery, BackendError> {
     let entries = match fs::read_dir(BACKLIGHT_CLASS_PATH) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -109,7 +116,7 @@ pub(super) fn discover(
             });
         }
         Err(error) => {
-            return Err(MonitorError::io(
+            return Err(BackendError::io(
                 format!("failed to read {BACKLIGHT_CLASS_PATH}"),
                 error,
             ));
@@ -202,10 +209,10 @@ fn external_monitor(
     bus: u32,
     connectors: &Connectors,
     ddc_monitor_ids: &HashSet<MonitorId>,
-) -> Result<Option<BacklightMonitor>, MonitorError> {
+) -> Result<Option<BacklightMonitor>, BackendError> {
     let edid_bytes = ddc::read_edid(bus)
-        .map_err(|error| MonitorError::io(format!("failed to read EDID on i2c-{bus}"), error))?;
-    let edid = edid::parse(&edid_bytes).ok_or_else(|| MonitorError::InvalidData {
+        .map_err(|error| BackendError::io(format!("failed to read EDID on i2c-{bus}"), error))?;
+    let edid = edid::parse(&edid_bytes).ok_or_else(|| BackendError::Device {
         context: "invalid EDID",
         details: format!("i2c-{bus}"),
     })?;
@@ -250,10 +257,10 @@ struct BacklightValues {
     max: u32,
 }
 
-fn read_values(path: &Path) -> Result<BacklightValues, MonitorError> {
+fn read_values(path: &Path) -> Result<BacklightValues, BackendError> {
     let max = read_u32(&path.join("max_brightness"))?;
     if max == 0 {
-        return Err(MonitorError::InvalidData {
+        return Err(BackendError::Device {
             context: "invalid backlight range",
             details: "max_brightness is 0".into(),
         });
@@ -278,16 +285,13 @@ fn type_priority(kind: &str) -> u8 {
     }
 }
 
-fn read_u32(path: &Path) -> Result<u32, MonitorError> {
+fn read_u32(path: &Path) -> Result<u32, BackendError> {
     let value = fs::read_to_string(path)
-        .map_err(|error| MonitorError::io(format!("failed to read {}", path.display()), error))?;
-    value
-        .trim()
-        .parse()
-        .map_err(|error| MonitorError::InvalidData {
-            context: "invalid backlight value",
-            details: format!("{}: {error}", path.display()),
-        })
+        .map_err(|error| BackendError::io(format!("failed to read {}", path.display()), error))?;
+    value.trim().parse().map_err(|error| BackendError::Device {
+        context: "invalid backlight value",
+        details: format!("{}: {error}", path.display()),
+    })
 }
 
 #[cfg(test)]

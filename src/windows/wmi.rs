@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use wmi::WMIConnection;
 
+use super::BackendError;
 use super::display_config::{ActiveDisplayPaths, normalize_pnp_id};
-use super::{MonitorError, MonitorId};
+use crate::MonitorId;
+use crate::controller::AdjustableMonitor;
 
 pub(super) struct WmiMonitor {
     id: MonitorId,
@@ -15,23 +17,27 @@ pub(super) struct WmiMonitor {
 }
 
 impl WmiMonitor {
-    pub(super) fn id(&self) -> &MonitorId {
-        &self.id
-    }
-
     pub(super) fn pnp_id(&self) -> &str {
         &self.pnp_id
     }
+}
 
-    pub(super) fn name(&self) -> &str {
+impl AdjustableMonitor for WmiMonitor {
+    type Error = BackendError;
+
+    fn id(&self) -> &MonitorId {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
         &self.name
     }
 
-    pub(super) fn brightness(&self) -> i32 {
+    fn brightness(&self) -> i32 {
         self.brightness
     }
 
-    pub(super) fn set_brightness(&mut self, percent: i32) -> Result<(), MonitorError> {
+    fn set_brightness(&mut self, percent: i32) -> Result<(), BackendError> {
         let percent = percent.clamp(0, 100);
         let connection = wmi_connection("ROOT\\WMI")?;
         let input = WmiSetBrightnessInput {
@@ -44,10 +50,10 @@ impl WmiMonitor {
                 "WmiSetBrightness",
                 input,
             )
-            .map_err(|error| MonitorError::wmi("WmiSetBrightness failed", error))?;
+            .map_err(|error| BackendError::wmi("WmiSetBrightness failed", error))?;
 
         if let Some(code) = output.and_then(|output| failed_return_value(output.ReturnValue)) {
-            return Err(MonitorError::Win32 {
+            return Err(BackendError::Win32 {
                 context: "WmiSetBrightness failed",
                 code,
             });
@@ -65,18 +71,18 @@ pub(super) struct WmiDiscovery {
 
 pub(super) fn discover(
     active_paths: Option<&ActiveDisplayPaths>,
-) -> Result<WmiDiscovery, MonitorError> {
+) -> Result<WmiDiscovery, BackendError> {
     let connection = wmi_connection("ROOT\\WMI")?;
     let brightness_monitors: Vec<WmiMonitorBrightness> = connection
         .raw_query(
             "SELECT InstanceName, Active, CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE",
         )
-        .map_err(|error| MonitorError::wmi("WMI brightness query failed", error))?;
+        .map_err(|error| BackendError::wmi("WMI brightness query failed", error))?;
     let brightness_methods: Vec<WmiMonitorBrightnessMethodsInstance> = connection
         .raw_query(
             "SELECT InstanceName, Active, __PATH FROM WmiMonitorBrightnessMethods WHERE Active = TRUE",
         )
-        .map_err(|error| MonitorError::wmi("WMI brightness methods query failed", error))?;
+        .map_err(|error| BackendError::wmi("WMI brightness methods query failed", error))?;
     let method_paths: HashMap<String, String> = brightness_methods
         .into_iter()
         .filter(|monitor| monitor.Active)
@@ -139,12 +145,12 @@ pub(super) fn discover(
     Ok(WmiDiscovery { monitors, warnings })
 }
 
-fn wmi_monitor_names(connection: &WMIConnection) -> Result<HashMap<String, String>, MonitorError> {
+fn wmi_monitor_names(connection: &WMIConnection) -> Result<HashMap<String, String>, BackendError> {
     let monitors = connection
         .raw_query::<WmiMonitorId>(
             "SELECT InstanceName, Active, UserFriendlyName FROM WmiMonitorID WHERE Active = TRUE",
         )
-        .map_err(|error| MonitorError::wmi("WMI monitor name query failed", error))?;
+        .map_err(|error| BackendError::wmi("WMI monitor name query failed", error))?;
 
     Ok(monitors
         .into_iter()
@@ -156,13 +162,13 @@ fn wmi_monitor_names(connection: &WMIConnection) -> Result<HashMap<String, Strin
         .collect())
 }
 
-fn pnp_monitor_names() -> Result<HashMap<String, String>, MonitorError> {
+fn pnp_monitor_names() -> Result<HashMap<String, String>, BackendError> {
     let connection = wmi_connection("ROOT\\CIMV2")?;
     let monitors = connection
         .raw_query::<Win32PnpEntity>(
             "SELECT Name, PNPDeviceID FROM Win32_PnPEntity WHERE PNPClass = 'Monitor'",
         )
-        .map_err(|error| MonitorError::wmi("PNP monitor name query failed", error))?;
+        .map_err(|error| BackendError::wmi("PNP monitor name query failed", error))?;
 
     Ok(monitors
         .into_iter()
@@ -176,9 +182,9 @@ fn pnp_monitor_names() -> Result<HashMap<String, String>, MonitorError> {
         .collect())
 }
 
-fn wmi_connection(namespace: &str) -> Result<WMIConnection, MonitorError> {
+fn wmi_connection(namespace: &str) -> Result<WMIConnection, BackendError> {
     WMIConnection::with_namespace_path(namespace)
-        .map_err(|error| MonitorError::wmi("WMI connection failed", error))
+        .map_err(|error| BackendError::wmi("WMI connection failed", error))
 }
 
 fn friendly_name_from_wmi(name: &Option<Vec<u16>>) -> Option<String> {
