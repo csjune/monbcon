@@ -1,5 +1,8 @@
 # monbcon
 
+[![crates.io](https://img.shields.io/crates/v/monbcon.svg)](https://crates.io/crates/monbcon)
+[![docs.rs](https://img.shields.io/docsrs/monbcon)](https://docs.rs/monbcon)
+
 Monitor discovery and brightness control for Windows and Linux.
 
 monbcon finds the displays attached to the system and reads or changes
