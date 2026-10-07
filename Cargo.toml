@@ -9,8 +9,7 @@ readme = "README.md"
 keywords = ["ddc", "brightness", "monitor", "backlight", "display"]
 categories = ["hardware-support", "os::linux-apis", "os::windows-apis"]
 rust-version = "1.85"
-# Not on crates.io yet; remove once the public API is ready to publish.
-publish = false
+exclude = [".github"]
 
 [target.'cfg(windows)'.dependencies]
 serde = { version = "1.0", features = ["derive"] }
