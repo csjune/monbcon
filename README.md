@@ -2,6 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/monbcon.svg)](https://crates.io/crates/monbcon)
 [![docs.rs](https://img.shields.io/docsrs/monbcon)](https://docs.rs/monbcon)
+[![CI](https://github.com/csjune/monbcon/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/csjune/monbcon/actions/workflows/ci.yml)
 
 Monitor discovery and brightness control for Windows and Linux.
 
