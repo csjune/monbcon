@@ -138,13 +138,13 @@ pub(super) fn discover(connectors: &Connectors) -> Result<DdcDiscovery, BackendE
         warnings.extend(outcome.warning);
     }
 
-    if monitors.is_empty() {
-        if let Some((bus_name, error)) = access_errors.first() {
-            warnings.push(format!(
-                "couldn't open /dev/{bus_name} ({error}); make sure the i2c-dev module is \
-                 loaded and the user can access /dev/i2c-* (for example via the i2c group)"
-            ));
-        }
+    if monitors.is_empty()
+        && let Some((bus_name, error)) = access_errors.first()
+    {
+        warnings.push(format!(
+            "couldn't open /dev/{bus_name} ({error}); make sure the i2c-dev module is \
+             loaded and the user can access /dev/i2c-* (for example via the i2c group)"
+        ));
     }
 
     claimed.retain(|claimed| {
