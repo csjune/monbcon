@@ -8,7 +8,7 @@ repository = "https://github.com/csjune/monbcon"
 readme = "README.md"
 keywords = ["ddc", "brightness", "monitor", "backlight", "display"]
 categories = ["hardware-support", "os::linux-apis", "os::windows-apis"]
-rust-version = "1.85"
+rust-version = "1.88"
 exclude = [".github"]
 
 [target.'cfg(windows)'.dependencies]
