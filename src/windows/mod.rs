@@ -59,20 +59,28 @@ pub(crate) fn discover() -> Discovery {
     };
     discovery.extend_warnings(active_paths.warnings.iter().cloned());
 
+    // WMI goes first so DDC can skip the panels it controls: probing those
+    // over DDC/CI only fails, and slowly.
+    let active_filter = active_paths.is_complete().then_some(&active_paths);
+    let wmi = discovery.backend("WMI monitors", wmi::discover(active_filter));
+    let wmi_pnp_ids = wmi
+        .iter()
+        .flat_map(|wmi| &wmi.monitors)
+        .map(|monitor| monitor.pnp_id().to_string())
+        .collect::<HashSet<_>>();
+
     let mut ddc_warnings = Vec::new();
-    if let Some(ddc) = discovery.backend("DDC monitors", ddc::discover(&active_paths)) {
+    if let Some(ddc) = discovery.backend("DDC monitors", ddc::discover(&active_paths, &wmi_pnp_ids))
+    {
         ddc_warnings = ddc.warnings;
         for monitor in ddc.monitors {
             discovery.add(monitor);
         }
     }
 
-    let mut wmi_pnp_ids = HashSet::new();
-    let active_filter = active_paths.is_complete().then_some(&active_paths);
-    if let Some(wmi) = discovery.backend("WMI monitors", wmi::discover(active_filter)) {
+    if let Some(wmi) = wmi {
         discovery.extend_warnings(wmi.warnings);
         for monitor in wmi.monitors {
-            wmi_pnp_ids.insert(monitor.pnp_id().to_string());
             discovery.add(monitor);
         }
     }

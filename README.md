@@ -19,7 +19,7 @@ for adjusting brightness across multiple monitors.
 
 ## Usage
 
-```rust
+```rust,no_run
 use monbcon::{BrightnessUpdate, MonitorController};
 
 fn main() -> Result<(), monbcon::MonitorError> {
@@ -53,7 +53,8 @@ were made against, and `apply` rejects updates from an older generation, so a
 change queued before the monitor list changed never reaches the wrong display.
 
 DDC/CI calls block for tens to hundreds of milliseconds, so applications with
-a UI should drive `MonitorController` from a worker thread.
+a UI should drive `MonitorController` from a worker thread. The controller is
+`Send`, and `apply` changes different monitors in parallel.
 
 ## Linux requirements
 

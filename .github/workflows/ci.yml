@@ -47,5 +47,30 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Build docs
+        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: Check package
         run: cargo package --locked --allow-dirty --no-verify
+
+  msrv:
+    name: MSRV ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.85
+
+      - name: Check build
+        run: cargo check --all-targets --locked

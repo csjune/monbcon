@@ -1,6 +1,6 @@
 [package]
 name = "monbcon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Windows and Linux monitor discovery and brightness control"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ exclude = [".github"]
 
 [target.'cfg(windows)'.dependencies]
 serde = { version = "1.0", features = ["derive"] }
-windows-sys = { version = ">=0.59, <=0.61", features = [
+windows-sys = { version = ">=0.61.2", features = [
     "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

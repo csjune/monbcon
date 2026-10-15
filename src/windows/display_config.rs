@@ -55,7 +55,7 @@ pub(super) fn active_display_paths() -> Result<ActiveDisplayPaths, BackendError>
         ..ActiveDisplayPaths::default()
     };
 
-    for path in paths {
+    for path in &paths {
         match active_display_path(path) {
             Ok((gdi_name, pnp_id)) => {
                 result.add_path(&gdi_name, pnp_id);
@@ -114,13 +114,13 @@ fn query_active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, BackendError> {
     ))
 }
 
-fn active_display_path(path: DISPLAYCONFIG_PATH_INFO) -> Result<(String, String), BackendError> {
+fn active_display_path(path: &DISPLAYCONFIG_PATH_INFO) -> Result<(String, String), BackendError> {
     let gdi_name = active_display_gdi_name(path)?;
     let pnp_id = active_display_pnp_id(path)?;
     Ok((gdi_name, pnp_id))
 }
 
-fn active_display_gdi_name(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, BackendError> {
+fn active_display_gdi_name(path: &DISPLAYCONFIG_PATH_INFO) -> Result<String, BackendError> {
     let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
             r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
@@ -147,7 +147,7 @@ fn active_display_gdi_name(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, Back
     })
 }
 
-fn active_display_pnp_id(path: DISPLAYCONFIG_PATH_INFO) -> Result<String, BackendError> {
+fn active_display_pnp_id(path: &DISPLAYCONFIG_PATH_INFO) -> Result<String, BackendError> {
     let mut target_name = DISPLAYCONFIG_TARGET_DEVICE_NAME {
         header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
             r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,

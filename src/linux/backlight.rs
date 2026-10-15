@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use super::BackendError;
 use super::ddc;
@@ -27,6 +29,7 @@ pub(super) struct BacklightMonitor {
     path: PathBuf,
     min: u32,
     max: u32,
+    prefer_sysfs: bool,
 }
 
 impl BacklightMonitor {
@@ -46,7 +49,12 @@ impl BacklightMonitor {
             path,
             min,
             max: values.max,
+            prefer_sysfs: false,
         }
+    }
+
+    fn write_sysfs(&self, raw: u32) -> io::Result<()> {
+        fs::write(self.path.join("brightness"), raw.to_string())
     }
 }
 
@@ -70,17 +78,24 @@ impl AdjustableMonitor for BacklightMonitor {
         let raw = percent_to_raw(percent, self.min, self.max);
 
         // logind lets the active session change the backlight without root.
-        // Fall back to sysfs for setups where the user owns the device.
-        if let Err(logind_error) = set_with_logind(&self.device_name, raw) {
-            fs::write(self.path.join("brightness"), raw.to_string()).map_err(|sysfs_error| {
-                BackendError::Device {
-                    context: "failed to set backlight brightness",
-                    details: format!(
-                        "{}: logind: {logind_error}; sysfs: {sysfs_error}",
-                        self.device_name
-                    ),
+        // Fall back to sysfs for setups where the user owns the device, and
+        // keep using it first once logind has failed there.
+        let set_through_sysfs = self.prefer_sysfs && self.write_sysfs(raw).is_ok();
+        if !set_through_sysfs {
+            match set_with_logind(&self.device_name, raw) {
+                Ok(()) => self.prefer_sysfs = false,
+                Err(logind_error) => {
+                    self.write_sysfs(raw)
+                        .map_err(|sysfs_error| BackendError::Device {
+                            context: "failed to set backlight brightness",
+                            details: format!(
+                                "{}: logind: {logind_error}; sysfs: {sysfs_error}",
+                                self.device_name
+                            ),
+                        })?;
+                    self.prefer_sysfs = true;
                 }
-            })?;
+            }
         }
 
         self.brightness = percent;
@@ -88,24 +103,49 @@ impl AdjustableMonitor for BacklightMonitor {
     }
 }
 
+/// The system bus connection shared by every backlight. Each connection runs
+/// its own executor thread, so one is kept rather than one per call.
+static SYSTEM_BUS: Mutex<Option<zbus::blocking::Connection>> = Mutex::new(None);
+
 fn set_with_logind(device_name: &str, raw: u32) -> zbus::Result<()> {
-    let connection = zbus::blocking::Connection::system()?;
-    connection.call_method(
+    let connection = {
+        let mut system_bus = SYSTEM_BUS.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*system_bus {
+            Some(connection) => connection.clone(),
+            None => system_bus
+                .insert(zbus::blocking::Connection::system()?)
+                .clone(),
+        }
+    };
+    let result = connection.call_method(
         Some("org.freedesktop.login1"),
         "/org/freedesktop/login1/session/auto",
         Some("org.freedesktop.login1.Session"),
         "SetBrightness",
         &(SUBSYSTEM, device_name, raw),
-    )?;
-    Ok(())
+    );
+    // logind rejecting the call leaves the connection usable; anything else
+    // may mean it broke, so the next call reconnects.
+    if result
+        .as_ref()
+        .is_err_and(|error| !matches!(error, zbus::Error::MethodError(..)))
+    {
+        SYSTEM_BUS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
+    result.map(|_| ())
 }
 
 /// Discovers internal panels and monitors exposed by the out-of-tree
 /// ddcci-backlight driver. `ddc_monitor_ids` holds the monitors the DDC
-/// backend already controls, so they are not listed twice.
+/// backend already controls, so they are not listed twice, and `edids` the
+/// EDIDs it already read by bus.
 pub(super) fn discover(
     connectors: &Connectors,
     ddc_monitor_ids: &HashSet<MonitorId>,
+    edids: &HashMap<u32, Vec<u8>>,
 ) -> Result<BacklightDiscovery, BackendError> {
     let entries = match fs::read_dir(BACKLIGHT_CLASS_PATH) {
         Ok(entries) => entries,
@@ -137,8 +177,15 @@ pub(super) fn discover(
             continue;
         };
         let result = match i2c_bus_of(&device_path) {
-            Some(bus) => external_monitor(&path, &device_name, bus, connectors, ddc_monitor_ids)
-                .map(|monitor| monitors.extend(monitor)),
+            Some(bus) => external_monitor(
+                &path,
+                &device_name,
+                bus,
+                connectors,
+                ddc_monitor_ids,
+                edids.get(&bus),
+            )
+            .map(|monitor| monitors.extend(monitor)),
             None => read_values(&path).map(|values| {
                 panels.push(Panel {
                     device_name: device_name.clone(),
@@ -209,19 +256,22 @@ fn external_monitor(
     bus: u32,
     connectors: &Connectors,
     ddc_monitor_ids: &HashSet<MonitorId>,
+    known_edid: Option<&Vec<u8>>,
 ) -> Result<Option<BacklightMonitor>, BackendError> {
-    let edid_bytes = ddc::read_edid(bus)
-        .map_err(|error| BackendError::io(format!("failed to read EDID on i2c-{bus}"), error))?;
+    let edid_bytes = match known_edid {
+        Some(bytes) => Cow::Borrowed(bytes.as_slice()),
+        None => Cow::Owned(ddc::read_edid(bus).map_err(|error| {
+            BackendError::io(format!("failed to read EDID on i2c-{bus}"), error)
+        })?),
+    };
     let edid = edid::parse(&edid_bytes).ok_or_else(|| BackendError::Device {
         context: "invalid EDID",
         details: format!("i2c-{bus}"),
     })?;
-    let connector_name = match connectors.match_edid(&edid_bytes) {
-        ConnectorMatch::Active(connector) => Some(connector.name.as_str()),
-        ConnectorMatch::Inactive => return Ok(None),
-        ConnectorMatch::Unknown => None,
+    let Some(placement) = ddc::place(&edid_bytes, bus, connectors) else {
+        return Ok(None);
     };
-    let id = ddc::monitor_id(&edid, bus, connector_name);
+    let id = placement.monitor_id(&edid, bus);
     if ddc_monitor_ids.contains(&id) {
         return Ok(None);
     }

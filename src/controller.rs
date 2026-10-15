@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use super::parallel::map_parallel;
 use super::platform::{self, BackendError};
 use super::{
-    ApplyOutcome, ApplyReport, BrightnessUpdate, MonitorError, MonitorId, MonitorSnapshot,
-    RefreshResult,
+    ApplyError, ApplyOutcome, ApplyReport, BrightnessUpdate, MonitorError, MonitorId,
+    MonitorSnapshot, RefreshResult,
 };
 
 /// A monitor whose brightness a platform backend can read and change.
@@ -40,7 +41,7 @@ impl<M: AdjustableMonitor + ?Sized> AdjustableMonitor for Box<M> {
     }
 }
 
-type PlatformMonitor = Box<dyn AdjustableMonitor<Error = BackendError>>;
+type PlatformMonitor = Box<dyn AdjustableMonitor<Error = BackendError> + Send>;
 
 /// What a platform found while discovering monitors through one or more
 /// backends.
@@ -74,7 +75,10 @@ impl Discovery {
         }
     }
 
-    pub(crate) fn add(&mut self, monitor: impl AdjustableMonitor<Error = BackendError> + 'static) {
+    pub(crate) fn add(
+        &mut self,
+        monitor: impl AdjustableMonitor<Error = BackendError> + Send + 'static,
+    ) {
         self.monitors.push(Box::new(monitor));
     }
 
@@ -92,6 +96,10 @@ impl Discovery {
     }
 }
 
+/// Discovers monitors and changes their brightness.
+///
+/// Hardware calls block, often for tens to hundreds of milliseconds, so
+/// applications with a UI should own the controller on a worker thread.
 pub struct MonitorController {
     monitors: Vec<PlatformMonitor>,
     generation: u64,
@@ -104,6 +112,8 @@ impl Default for MonitorController {
 }
 
 impl MonitorController {
+    /// Creates a controller with no monitors. Call [`refresh`](Self::refresh)
+    /// to discover them.
     pub fn new() -> Self {
         Self {
             monitors: Vec::new(),
@@ -113,6 +123,12 @@ impl MonitorController {
 
     /// Discovers the current monitors and starts a new generation. On
     /// failure the previous monitors and generation stay in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MonitorError::DiscoveryFailed`] if every discovery backend
+    /// of the platform failed. Problems that leave some backend working are
+    /// reported in [`RefreshResult::warnings`] instead.
     pub fn refresh(&mut self) -> Result<RefreshResult, MonitorError> {
         let Discovery {
             mut monitors,
@@ -144,6 +160,11 @@ impl MonitorController {
         })
     }
 
+    /// Applies brightness updates to the monitors of the latest refresh.
+    ///
+    /// Updates from an older generation or for unknown monitors are rejected
+    /// without touching any hardware. Different monitors are changed in
+    /// parallel, and updates to the same monitor are applied in order.
     pub fn apply(&mut self, updates: Vec<BrightnessUpdate>) -> ApplyReport {
         apply_updates(&mut self.monitors, self.generation, updates)
     }
@@ -167,68 +188,83 @@ fn retain_unique_ids<M: AdjustableMonitor>(monitors: &mut Vec<M>, warnings: &mut
 
 /// Applies brightness updates to the monitors of the current refresh
 /// generation. Updates from an older generation, or for monitors that are no
-/// longer present, are rejected without touching any hardware.
-fn apply_updates<M: AdjustableMonitor>(
+/// longer present, are rejected without touching any hardware. Different
+/// monitors are updated in parallel; updates to one monitor keep their order.
+fn apply_updates<M: AdjustableMonitor + Send>(
     monitors: &mut [M],
     generation: u64,
     updates: Vec<BrightnessUpdate>,
 ) -> ApplyReport {
-    let outcomes = updates
-        .into_iter()
-        .map(|update| {
-            let requested = update.value.clamp(0, 100);
-            if update.generation != generation {
-                return ApplyOutcome {
-                    generation: update.generation,
-                    id: update.id,
-                    requested,
-                    effective: None,
-                    error: Some(
-                        MonitorError::StaleGeneration {
-                            requested: update.generation,
-                            current: generation,
-                        }
-                        .to_string(),
-                    ),
-                };
+    let mut outcomes = Vec::with_capacity(updates.len());
+    let mut pending = monitors.iter().map(|_| Vec::new()).collect::<Vec<_>>();
+
+    for (index, update) in updates.into_iter().enumerate() {
+        let error = if update.generation != generation {
+            ApplyError::StaleGeneration {
+                requested: update.generation,
+                current: generation,
             }
-            let Some(monitor) = monitors
-                .iter_mut()
-                .find(|monitor| monitor.id() == &update.id)
-            else {
-                let error = MonitorError::UnknownMonitor(update.id.clone()).to_string();
-                return ApplyOutcome {
-                    generation: update.generation,
-                    id: update.id,
-                    requested,
-                    effective: None,
-                    error: Some(error),
-                };
-            };
+        } else if let Some(position) = monitors
+            .iter()
+            .position(|monitor| monitor.id() == &update.id)
+        {
+            pending[position].push((index, update));
+            outcomes.push(None);
+            continue;
+        } else {
+            ApplyError::UnknownMonitor
+        };
 
-            let previous = monitor.brightness();
-            let error = monitor
-                .set_brightness(requested)
-                .err()
-                .map(|error| error.to_string());
+        outcomes.push(Some(ApplyOutcome {
+            generation: update.generation,
+            id: update.id,
+            requested: update.value.clamp(0, 100),
+            effective: None,
+            error: Some(error),
+        }));
+    }
 
-            ApplyOutcome {
-                generation: update.generation,
-                id: update.id,
-                requested,
-                effective: Some(if error.is_some() { previous } else { requested }),
-                error,
-            }
-        })
-        .collect();
+    let jobs = monitors
+        .iter_mut()
+        .zip(pending)
+        .filter(|(_, updates)| !updates.is_empty())
+        .collect::<Vec<_>>();
+    let applied = map_parallel(jobs, |(monitor, updates)| {
+        updates
+            .into_iter()
+            .map(|(index, update)| (index, apply_update(monitor, update)))
+            .collect::<Vec<_>>()
+    });
+    for (index, outcome) in applied.into_iter().flatten() {
+        outcomes[index] = Some(outcome);
+    }
 
-    ApplyReport { outcomes }
+    ApplyReport {
+        outcomes: outcomes.into_iter().flatten().collect(),
+    }
+}
+
+fn apply_update<M: AdjustableMonitor>(monitor: &mut M, update: BrightnessUpdate) -> ApplyOutcome {
+    let requested = update.value.clamp(0, 100);
+    let previous = monitor.brightness();
+    let error = monitor
+        .set_brightness(requested)
+        .err()
+        .map(|error| ApplyError::Backend(error.to_string()));
+
+    ApplyOutcome {
+        generation: update.generation,
+        id: update.id,
+        requested,
+        effective: Some(if error.is_some() { previous } else { requested }),
+        error,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{AdjustableMonitor, apply_updates, retain_unique_ids};
-    use crate::{BrightnessUpdate, MonitorId};
+    use crate::{ApplyError, BrightnessUpdate, MonitorId};
 
     struct FakeMonitor {
         id: MonitorId,
@@ -297,7 +333,10 @@ mod tests {
 
         let outcome = &report.outcomes[0];
         assert_eq!(outcome.effective, Some(20));
-        assert!(outcome.error.is_some());
+        assert_eq!(
+            outcome.error,
+            Some(ApplyError::Backend("write failed for a".into()))
+        );
     }
 
     #[test]
@@ -309,13 +348,66 @@ mod tests {
             vec![update(2, "a", 60), update(3, "missing", 60)],
         );
 
-        assert!(
-            report
-                .outcomes
-                .iter()
-                .all(|outcome| outcome.effective.is_none() && outcome.error.is_some())
+        let errors = report
+            .outcomes
+            .iter()
+            .map(|outcome| (outcome.effective, outcome.error.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            errors,
+            [
+                (
+                    None,
+                    Some(ApplyError::StaleGeneration {
+                        requested: 2,
+                        current: 3
+                    })
+                ),
+                (None, Some(ApplyError::UnknownMonitor)),
+            ]
         );
         assert_eq!(monitors[0].brightness, 20);
+    }
+
+    #[test]
+    fn outcomes_follow_the_update_order_across_monitors() {
+        let mut monitors = [
+            FakeMonitor::new("a", 10, false),
+            FakeMonitor::new("b", 20, false),
+        ];
+        let report = apply_updates(
+            &mut monitors,
+            3,
+            vec![
+                update(3, "b", 30),
+                update(3, "a", 40),
+                update(3, "missing", 50),
+                update(3, "b", 60),
+            ],
+        );
+
+        let applied = report
+            .outcomes
+            .iter()
+            .map(|outcome| (outcome.id.as_str(), outcome.effective))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            applied,
+            [
+                ("b", Some(30)),
+                ("a", Some(40)),
+                ("missing", None),
+                ("b", Some(60)),
+            ]
+        );
+        assert_eq!(monitors[0].brightness, 40);
+        assert_eq!(monitors[1].brightness, 60);
+    }
+
+    #[test]
+    fn controller_can_move_to_a_worker_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<crate::MonitorController>();
     }
 
     #[test]

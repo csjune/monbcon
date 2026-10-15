@@ -4,7 +4,7 @@ mod drm;
 mod edid;
 mod i2c;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 
@@ -60,9 +60,11 @@ pub(crate) fn discover() -> Discovery {
     };
 
     let mut claimed = Vec::new();
+    let mut edids = HashMap::new();
     if let Some(ddc) = discovery.backend("DDC monitors", ddc::discover(&connectors)) {
         discovery.extend_warnings(ddc.warnings);
         claimed = ddc.claimed;
+        edids = ddc.edids;
         for monitor in ddc.monitors {
             discovery.add(monitor);
         }
@@ -71,7 +73,7 @@ pub(crate) fn discover() -> Discovery {
     let ddc_monitor_ids = discovery.monitor_ids().cloned().collect::<HashSet<_>>();
     if let Some(backlight) = discovery.backend(
         "backlight devices",
-        backlight::discover(&connectors, &ddc_monitor_ids),
+        backlight::discover(&connectors, &ddc_monitor_ids, &edids),
     ) {
         discovery.extend_warnings(backlight.warnings);
         for monitor in backlight.monitors {

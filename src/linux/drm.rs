@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::BackendError;
+use super::i2c;
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
 const EDID_BLOCK_LEN: usize = 128;
@@ -10,6 +11,8 @@ pub(super) struct Connector {
     pub(super) name: String,
     pub(super) active: bool,
     device_path: PathBuf,
+    /// The I2C adapter a non-DP connector links as its DDC channel.
+    ddc_path: Option<PathBuf>,
     edid: Vec<u8>,
 }
 
@@ -29,17 +32,12 @@ impl Connectors {
     /// are not linked to their connector in sysfs, so EDID is the only
     /// reliable key.
     pub(super) fn match_edid(&self, edid: &[u8]) -> ConnectorMatch<'_> {
-        let Some(base) = edid.get(..EDID_BLOCK_LEN) else {
-            return ConnectorMatch::Unknown;
-        };
         let mut matched = false;
-        for connector in &self.connectors {
-            if connector.edid.get(..EDID_BLOCK_LEN) == Some(base) {
-                if connector.active {
-                    return ConnectorMatch::Active(connector);
-                }
-                matched = true;
+        for connector in self.with_edid(edid) {
+            if connector.active {
+                return ConnectorMatch::Active(connector);
             }
+            matched = true;
         }
         if matched {
             ConnectorMatch::Inactive
@@ -48,13 +46,49 @@ impl Connectors {
         }
     }
 
+    /// Counts the active connectors showing the same base EDID block. More
+    /// than one means identical monitors that the EDID can't tell apart.
+    pub(super) fn active_edid_count(&self, edid: &[u8]) -> usize {
+        self.with_edid(edid)
+            .filter(|connector| connector.active)
+            .count()
+    }
+
     /// Finds the connector that owns a sysfs device, such as a backlight
     /// device registered under `card1-eDP-1`.
     pub(super) fn match_device(&self, device_path: &Path) -> ConnectorMatch<'_> {
+        self.first_match(|connector| device_path.starts_with(&connector.device_path))
+    }
+
+    /// Finds the connector an I2C bus belongs to. DP AUX adapters are
+    /// registered under their connector, and other connectors link their
+    /// adapter as `ddc`. DP MST buses have no such link.
+    pub(super) fn match_bus(&self, bus: u32) -> ConnectorMatch<'_> {
+        match fs::canonicalize(i2c::bus_device_path(bus)) {
+            Ok(bus_path) => self.match_bus_path(&bus_path),
+            Err(_) => ConnectorMatch::Unknown,
+        }
+    }
+
+    fn match_bus_path(&self, bus_path: &Path) -> ConnectorMatch<'_> {
+        self.first_match(|connector| {
+            bus_path.starts_with(&connector.device_path)
+                || connector.ddc_path.as_deref() == Some(bus_path)
+        })
+    }
+
+    fn with_edid<'a>(&'a self, edid: &[u8]) -> impl Iterator<Item = &'a Connector> {
+        let base = edid.get(..EDID_BLOCK_LEN);
+        self.connectors
+            .iter()
+            .filter(move |connector| base.is_some() && connector.edid.get(..EDID_BLOCK_LEN) == base)
+    }
+
+    fn first_match(&self, predicate: impl Fn(&Connector) -> bool) -> ConnectorMatch<'_> {
         match self
             .connectors
             .iter()
-            .find(|connector| device_path.starts_with(&connector.device_path))
+            .find(|connector| predicate(connector))
         {
             Some(connector) if connector.active => ConnectorMatch::Active(connector),
             Some(_) => ConnectorMatch::Inactive,
@@ -83,6 +117,7 @@ pub(super) fn connectors() -> Result<Connectors, BackendError> {
             name: name.to_string(),
             active: connected && enabled,
             device_path,
+            ddc_path: fs::canonicalize(path.join("ddc")).ok(),
             edid: fs::read(path.join("edid")).unwrap_or_default(),
         });
     }
@@ -114,6 +149,7 @@ mod tests {
             name: name.into(),
             active,
             device_path: PathBuf::from(format!("/sys/devices/drm/card1/card1-{name}")),
+            ddc_path: None,
             edid: vec![edid_byte; 256],
         }
     }
@@ -150,6 +186,42 @@ mod tests {
         ));
         assert!(matches!(
             connectors.match_edid(&[1; 16]),
+            ConnectorMatch::Unknown
+        ));
+    }
+
+    #[test]
+    fn identical_edids_are_counted_per_active_connector() {
+        let connectors = Connectors {
+            connectors: vec![
+                connector("DP-1", true, 1),
+                connector("HDMI-A-1", true, 1),
+                connector("DP-2", false, 1),
+                connector("DP-3", true, 2),
+            ],
+        };
+        assert_eq!(connectors.active_edid_count(&[1; 128]), 2);
+        assert_eq!(connectors.active_edid_count(&[2; 128]), 1);
+        assert_eq!(connectors.active_edid_count(&[1; 16]), 0);
+    }
+
+    #[test]
+    fn buses_match_aux_children_and_ddc_links() {
+        let mut hdmi = connector("HDMI-A-1", true, 1);
+        hdmi.ddc_path = Some(PathBuf::from("/sys/devices/pci0000:00/i2c-3"));
+        let connectors = Connectors {
+            connectors: vec![connector("DP-1", true, 1), hdmi],
+        };
+        assert!(matches!(
+            connectors.match_bus_path(Path::new("/sys/devices/drm/card1/card1-DP-1/i2c-5")),
+            ConnectorMatch::Active(connector) if connector.name == "DP-1"
+        ));
+        assert!(matches!(
+            connectors.match_bus_path(Path::new("/sys/devices/pci0000:00/i2c-3")),
+            ConnectorMatch::Active(connector) if connector.name == "HDMI-A-1"
+        ));
+        assert!(matches!(
+            connectors.match_bus_path(Path::new("/sys/devices/pci0000:00/i2c-9")),
             ConnectorMatch::Unknown
         ));
     }

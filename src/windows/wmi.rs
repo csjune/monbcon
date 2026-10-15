@@ -1,12 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use wmi::WMIConnection;
+use wmi::{WMIConnection, WMIError};
 
 use super::BackendError;
 use super::display_config::{ActiveDisplayPaths, normalize_pnp_id};
 use crate::MonitorId;
 use crate::controller::AdjustableMonitor;
+
+const WBEM_E_NOT_SUPPORTED: i32 = 0x8004_100C_u32 as i32;
 
 pub(super) struct WmiMonitor {
     id: MonitorId,
@@ -73,11 +76,20 @@ pub(super) fn discover(
     active_paths: Option<&ActiveDisplayPaths>,
 ) -> Result<WmiDiscovery, BackendError> {
     let connection = wmi_connection("ROOT\\WMI")?;
-    let brightness_monitors: Vec<WmiMonitorBrightness> = connection
-        .raw_query(
-            "SELECT InstanceName, Active, CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE",
-        )
-        .map_err(|error| BackendError::wmi("WMI brightness query failed", error))?;
+    let brightness_monitors: Vec<WmiMonitorBrightness> = match connection.raw_query(
+        "SELECT InstanceName, Active, CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE",
+    ) {
+        Ok(monitors) => monitors,
+        // Systems without an integrated panel, such as desktops, have no
+        // brightness provider and reject the query as unsupported.
+        Err(error) if is_not_supported(&error) => {
+            return Ok(WmiDiscovery {
+                monitors: Vec::new(),
+                warnings: Vec::new(),
+            });
+        }
+        Err(error) => return Err(BackendError::wmi("WMI brightness query failed", error)),
+    };
     let brightness_methods: Vec<WmiMonitorBrightnessMethodsInstance> = connection
         .raw_query(
             "SELECT InstanceName, Active, __PATH FROM WmiMonitorBrightnessMethods WHERE Active = TRUE",
@@ -96,14 +108,7 @@ pub(super) fn discover(
             HashMap::new()
         }
     };
-    let pnp_names = match pnp_monitor_names() {
-        Ok(names) => names,
-        Err(error) => {
-            warnings.push(format!("failed to query PNP monitor names: {error}"));
-            HashMap::new()
-        }
-    };
-    let mut monitors = Vec::new();
+    let mut candidates = Vec::new();
 
     for monitor in brightness_monitors
         .into_iter()
@@ -126,21 +131,39 @@ pub(super) fn discover(
         if active_paths.is_some_and(|paths| !paths.contains_pnp_id(&pnp_id)) {
             continue;
         }
-
-        let name = friendly_names
-            .get(&monitor.InstanceName)
-            .cloned()
-            .or_else(|| pnp_names.get(&pnp_id).cloned())
-            .unwrap_or_else(|| "Integrated Monitor".into());
-
-        monitors.push(WmiMonitor {
-            id: MonitorId::new(format!("wmi:{}", normalize_pnp_id(&monitor.InstanceName))),
-            pnp_id,
-            name,
-            brightness: monitor.CurrentBrightness as i32,
-            instance_path,
-        });
+        candidates.push((monitor, pnp_id, instance_path));
     }
+
+    let unnamed = candidates
+        .iter()
+        .filter(|(monitor, _, _)| !friendly_names.contains_key(&monitor.InstanceName))
+        .map(|(_, pnp_id, _)| pnp_id.as_str());
+    let pnp_names = match pnp_names_for(unnamed) {
+        Ok(names) => names,
+        Err(error) => {
+            warnings.push(format!("failed to query PNP monitor names: {error}"));
+            HashMap::new()
+        }
+    };
+
+    let monitors = candidates
+        .into_iter()
+        .map(|(monitor, pnp_id, instance_path)| {
+            let name = friendly_names
+                .get(&monitor.InstanceName)
+                .cloned()
+                .or_else(|| pnp_names.get(&pnp_id).cloned())
+                .unwrap_or_else(|| "Integrated Monitor".into());
+
+            WmiMonitor {
+                id: MonitorId::new(format!("wmi:{}", normalize_pnp_id(&monitor.InstanceName))),
+                pnp_id,
+                name,
+                brightness: monitor.CurrentBrightness as i32,
+                instance_path,
+            }
+        })
+        .collect();
 
     Ok(WmiDiscovery { monitors, warnings })
 }
@@ -162,6 +185,32 @@ fn wmi_monitor_names(connection: &WMIConnection) -> Result<HashMap<String, Strin
         .collect())
 }
 
+/// Monitor names from `Win32_PnPEntity`, kept for the life of the process
+/// because the query takes hundreds of milliseconds. `None` marks a monitor
+/// the query didn't name, so it isn't queried for again.
+static PNP_NAMES: Mutex<BTreeMap<String, Option<String>>> = Mutex::new(BTreeMap::new());
+
+/// Looks up the PNP names of `pnp_ids`, querying only when one of them
+/// hasn't been seen before.
+fn pnp_names_for<'a>(
+    pnp_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<HashMap<String, String>, BackendError> {
+    let pnp_ids = pnp_ids.into_iter().collect::<Vec<_>>();
+    let mut cache = PNP_NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+    if pnp_ids.iter().any(|pnp_id| !cache.contains_key(*pnp_id)) {
+        let names = pnp_monitor_names()?;
+        cache.extend(names.into_iter().map(|(pnp_id, name)| (pnp_id, Some(name))));
+        for pnp_id in &pnp_ids {
+            cache.entry(pnp_id.to_string()).or_insert(None);
+        }
+    }
+
+    Ok(pnp_ids
+        .into_iter()
+        .filter_map(|pnp_id| Some((pnp_id.to_string(), cache.get(pnp_id)?.clone()?)))
+        .collect())
+}
+
 fn pnp_monitor_names() -> Result<HashMap<String, String>, BackendError> {
     let connection = wmi_connection("ROOT\\CIMV2")?;
     let monitors = connection
@@ -180,6 +229,10 @@ fn pnp_monitor_names() -> Result<HashMap<String, String>, BackendError> {
         })
         .filter(|(_, name)| !name.is_empty())
         .collect())
+}
+
+fn is_not_supported(error: &WMIError) -> bool {
+    matches!(error, WMIError::HResultError { hres } if *hres == WBEM_E_NOT_SUPPORTED)
 }
 
 fn wmi_connection(namespace: &str) -> Result<WMIConnection, BackendError> {
@@ -268,7 +321,23 @@ fn failed_return_value(return_value: Option<u32>) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{failed_return_value, friendly_name_from_wmi, wmi_instance_to_pnp_id};
+    use wmi::WMIError;
+
+    use super::{
+        WBEM_E_NOT_SUPPORTED, failed_return_value, friendly_name_from_wmi, is_not_supported,
+        wmi_instance_to_pnp_id,
+    };
+
+    #[test]
+    fn only_unsupported_queries_mean_no_integrated_panel() {
+        assert!(is_not_supported(&WMIError::HResultError {
+            hres: WBEM_E_NOT_SUPPORTED
+        }));
+        assert!(!is_not_supported(&WMIError::HResultError {
+            hres: 0x8004_1001_u32 as i32
+        }));
+        assert!(!is_not_supported(&WMIError::ResultEmpty));
+    }
 
     #[test]
     fn missing_wmi_return_value_is_treated_as_success() {

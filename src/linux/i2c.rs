@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 
 const I2C_DEVICES_PATH: &str = "/sys/bus/i2c/devices";
 const I2C_SLAVE: libc::c_ulong = 0x0703;
@@ -47,6 +48,10 @@ pub(super) fn display_buses() -> io::Result<Vec<I2cBus>> {
     }
     buses.sort_by_key(|bus| bus.number);
     Ok(buses)
+}
+
+pub(super) fn bus_device_path(bus: u32) -> PathBuf {
+    Path::new(I2C_DEVICES_PATH).join(format!("i2c-{bus}"))
 }
 
 fn is_ignored_adapter(name: &str) -> bool {
